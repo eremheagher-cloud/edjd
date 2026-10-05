@@ -1,0 +1,643 @@
+name: PC criado pelo @alves7.pcm
+
+on:
+  workflow_dispatch:
+    inputs:
+      instance_number:
+        description: 'Instance Number (1-10)'
+        required: true
+        default: '1'
+        type: string
+
+jobs:
+  deploy-rdp:
+    runs-on: windows-11-arm
+    timeout-minutes: 360
+
+    steps:
+
+    # ============================================================
+    # CHECKOUT
+    # ============================================================
+    - name: Checkout Repository
+      uses: actions/checkout@v4
+
+    # ============================================================
+    # SYSTEM INFORMATION
+    # ============================================================
+    - name: System Information
+      shell: powershell
+      run: |
+        Write-Host "========================================" -ForegroundColor Cyan
+        Write-Host "       ENIGMANO RDP DEPLOYMENT          " -ForegroundColor Cyan
+        Write-Host "========================================" -ForegroundColor Cyan
+
+        Write-Host "Instance Number: ${{ inputs.instance_number }}" -ForegroundColor Yellow
+        Write-Host "Runner Name: $env:RUNNER_NAME" -ForegroundColor Yellow
+        Write-Host "Workflow: $env:GITHUB_WORKFLOW" -ForegroundColor Yellow
+        Write-Host ""
+
+        $os = Get-CimInstance Win32_OperatingSystem
+        $cpu = Get-CimInstance Win32_Processor
+
+        $totalRAM = [math]::Round($os.TotalVisibleMemorySize / 1MB, 2)
+        $freeRAM = [math]::Round($os.FreePhysicalMemory / 1MB, 2)
+        $usedRAM = [math]::Round($totalRAM - $freeRAM, 2)
+
+        Write-Host "=== OPERATING SYSTEM ===" -ForegroundColor Green
+        Write-Host "Name: $($os.Caption)"
+        Write-Host "Version: $($os.Version)"
+        Write-Host "Build: $($os.BuildNumber)"
+        Write-Host "Architecture: $($os.OSArchitecture)"
+        Write-Host ""
+
+        Write-Host "=== MEMORY ===" -ForegroundColor Green
+        Write-Host "Total RAM: $totalRAM GB"
+        Write-Host "Available RAM: $freeRAM GB"
+        Write-Host "Used RAM: $usedRAM GB"
+        Write-Host ""
+
+        Write-Host "=== CPU ===" -ForegroundColor Green
+        Write-Host "CPU: $($cpu.Name)"
+        Write-Host "Cores: $($cpu.NumberOfCores)"
+        Write-Host "Logical Processors: $($cpu.NumberOfLogicalProcessors)"
+        Write-Host ""
+
+        Write-Host "=== ENVIRONMENT ===" -ForegroundColor Green
+        Write-Host "PROCESSOR_ARCHITECTURE: $env:PROCESSOR_ARCHITECTURE"
+        Write-Host "PROCESSOR_ARCHITEW6432: $env:PROCESSOR_ARCHITEW6432"
+        Write-Host "RUNNER_ARCH: $env:RUNNER_ARCH"
+        Write-Host "RUNNER_OS: $env:RUNNER_OS"
+
+    # ============================================================
+    # WINDOWS VERSION CHECK
+    # ============================================================
+    - name: Check Windows Version
+      shell: powershell
+      run: |
+        $os = Get-CimInstance Win32_OperatingSystem
+
+        Write-Host "Windows detected: $($os.Caption)" -ForegroundColor Cyan
+        Write-Host "Version: $($os.Version)" -ForegroundColor Cyan
+        Write-Host "Build: $($os.BuildNumber)" -ForegroundColor Cyan
+
+        if ($os.Caption -match "Windows 11") {
+          Write-Host "Windows 11 detected successfully." -ForegroundColor Green
+        }
+        else {
+          Write-Host "WARNING: This runner is not reporting Windows 11." -ForegroundColor Yellow
+        }
+
+    # ============================================================
+    # WINDOWS UPDATE - MANTIDO
+    # ============================================================
+    - name: Windows Update
+      continue-on-error: true
+      shell: powershell
+      run: |
+        Write-Host "========================================" -ForegroundColor Cyan
+        Write-Host "        WINDOWS UPDATE                  " -ForegroundColor Cyan
+        Write-Host "========================================" -ForegroundColor Cyan
+
+        try {
+          $service = Get-Service `
+            -Name "wuauserv" `
+            -ErrorAction SilentlyContinue
+
+          if ($service) {
+            Write-Host "Windows Update service: $($service.Status)" `
+              -ForegroundColor Yellow
+
+            if ($service.Status -ne "Running") {
+              Write-Host "Starting Windows Update service..." `
+                -ForegroundColor Cyan
+
+              Start-Service `
+                -Name "wuauserv" `
+                -ErrorAction SilentlyContinue
+
+              Start-Sleep -Seconds 3
+            }
+          }
+
+          Write-Host "Searching for available Windows updates..." `
+            -ForegroundColor Cyan
+
+          $session = New-Object -ComObject Microsoft.Update.Session
+
+          $searcher = $session.CreateUpdateSearcher()
+
+          $result = $searcher.Search(
+            "IsInstalled=0 and Type='Software' and IsHidden=0"
+          )
+
+          Write-Host ""
+          Write-Host "Available updates: $($result.Updates.Count)" `
+            -ForegroundColor Green
+
+          if ($result.Updates.Count -gt 0) {
+
+            foreach ($update in $result.Updates) {
+              Write-Host ""
+              Write-Host "Update: $($update.Title)" `
+                -ForegroundColor White
+            }
+
+            Write-Host ""
+            Write-Host "Downloading available updates..." `
+              -ForegroundColor Cyan
+
+            $updatesToDownload = New-Object `
+              -ComObject Microsoft.Update.UpdateColl
+
+            foreach ($update in $result.Updates) {
+              if (!$update.IsDownloaded) {
+                [void]$updatesToDownload.Add($update)
+              }
+            }
+
+            if ($updatesToDownload.Count -gt 0) {
+
+              $downloader = $session.CreateUpdateDownloader()
+              $downloader.Updates = $updatesToDownload
+
+              $downloadResult = $downloader.Download()
+
+              Write-Host "Download result code: $($downloadResult.ResultCode)" `
+                -ForegroundColor Green
+            }
+
+            Write-Host ""
+            Write-Host "Installing applicable updates..." `
+              -ForegroundColor Cyan
+
+            $updatesToInstall = New-Object `
+              -ComObject Microsoft.Update.UpdateColl
+
+            foreach ($update in $result.Updates) {
+              if ($update.IsDownloaded -and !$update.IsInstalled) {
+                [void]$updatesToInstall.Add($update)
+              }
+            }
+
+            if ($updatesToInstall.Count -gt 0) {
+
+              $installer = $session.CreateUpdateInstaller()
+              $installer.Updates = $updatesToInstall
+
+              $installResult = $installer.Install()
+
+              Write-Host "Installation result code: $($installResult.ResultCode)" `
+                -ForegroundColor Green
+
+              Write-Host "Reboot required: $($installResult.RebootRequired)" `
+                -ForegroundColor Yellow
+            }
+            else {
+              Write-Host "No downloaded updates ready for installation." `
+                -ForegroundColor Yellow
+            }
+          }
+          else {
+            Write-Host "Windows is already up to date." `
+              -ForegroundColor Green
+          }
+        }
+        catch {
+          Write-Host "Windows Update encountered an error:" `
+            -ForegroundColor Yellow
+
+          Write-Host $_.Exception.Message `
+            -ForegroundColor Yellow
+        }
+
+    # ============================================================
+    # FINAL WINDOWS UPDATE CHECK
+    # ============================================================
+    - name: Verify Windows Updates
+      continue-on-error: true
+      shell: powershell
+      run: |
+        Write-Host "Checking Windows Update status again..." `
+          -ForegroundColor Cyan
+
+        try {
+          $session = New-Object -ComObject Microsoft.Update.Session
+          $searcher = $session.CreateUpdateSearcher()
+
+          $result = $searcher.Search(
+            "IsInstalled=0 and Type='Software' and IsHidden=0"
+          )
+
+          Write-Host "Remaining available updates: $($result.Updates.Count)" `
+            -ForegroundColor Green
+
+          foreach ($update in $result.Updates) {
+            Write-Host "- $($update.Title)" `
+              -ForegroundColor White
+          }
+        }
+        catch {
+          Write-Host "Final Windows Update check failed:" `
+            -ForegroundColor Yellow
+
+          Write-Host $_.Exception.Message `
+            -ForegroundColor Yellow
+        }
+
+    # ============================================================
+    # FINAL WINDOWS VERIFICATION
+    # ============================================================
+    - name: Final Windows Verification
+      shell: powershell
+      run: |
+        $os = Get-CimInstance Win32_OperatingSystem
+
+        Write-Host "========================================" -ForegroundColor Green
+        Write-Host "       FINAL WINDOWS INFORMATION        " -ForegroundColor Green
+        Write-Host "========================================" -ForegroundColor Green
+
+        Write-Host "Product: $($os.Caption)"
+        Write-Host "Version: $($os.Version)"
+        Write-Host "Build: $($os.BuildNumber)"
+        Write-Host "Architecture: $($os.OSArchitecture)"
+
+    # ============================================================
+    # TPM / COMPATIBILITY
+    # ============================================================
+    - name: Configure Windows Compatibility
+      shell: powershell
+      run: |
+        Write-Host "Configuring compatibility settings..." `
+          -ForegroundColor Cyan
+
+        New-Item `
+          -Path "HKLM:\SYSTEM\Setup\LabConfig" `
+          -Force | Out-Null
+
+        New-ItemProperty `
+          -Path "HKLM:\SYSTEM\Setup\LabConfig" `
+          -Name "BypassTPMCheck" `
+          -PropertyType DWord `
+          -Value 1 `
+          -Force | Out-Null
+
+        New-Item `
+          -Path "HKLM:\SYSTEM\Setup\MoSetup" `
+          -Force | Out-Null
+
+        New-ItemProperty `
+          -Path "HKLM:\SYSTEM\Setup\MoSetup" `
+          -Name "AllowUpgradesWithUnsupportedTPMOrCPU" `
+          -PropertyType DWord `
+          -Value 1 `
+          -Force | Out-Null
+
+        Write-Host "Compatibility settings configured." `
+          -ForegroundColor Green
+
+    # ============================================================
+    # ENABLE RDP
+    # ============================================================
+    - name: Enable Remote Desktop
+      shell: powershell
+      run: |
+        Write-Host "Enabling Remote Desktop..." -ForegroundColor Cyan
+
+        Set-ItemProperty `
+          -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' `
+          -Name "fDenyTSConnections" `
+          -Value 0
+
+        Set-ItemProperty `
+          -Path 'HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' `
+          -Name "UserAuthentication" `
+          -Value 1
+
+        Enable-NetFirewallRule `
+          -DisplayGroup "Remote Desktop" `
+          -ErrorAction SilentlyContinue
+
+        Write-Host "RDP enabled." -ForegroundColor Green
+
+    # ============================================================
+    # RAFAEL USER
+    # ============================================================
+    - name: Configure Rafael User
+      shell: powershell
+      run: |
+        Write-Host "Configuring Rafael account..." -ForegroundColor Cyan
+
+        $Password = ConvertTo-SecureString `
+          "P@ssw0rd!" `
+          -AsPlainText `
+          -Force
+
+        $existingUser = Get-LocalUser `
+          -Name "Rafael" `
+          -ErrorAction SilentlyContinue
+
+        if ($existingUser) {
+
+          Set-LocalUser `
+            -Name "Rafael" `
+            -Password $Password
+
+          Enable-LocalUser `
+            -Name "Rafael"
+
+          Write-Host "User Rafael updated." `
+            -ForegroundColor Green
+        }
+        else {
+
+          New-LocalUser `
+            -Name "Rafael" `
+            -Password $Password `
+            -FullName "Rafael"
+
+          Write-Host "User Rafael created." `
+            -ForegroundColor Green
+        }
+
+        Add-LocalGroupMember `
+          -Group "Administrators" `
+          -Member "Rafael" `
+          -ErrorAction SilentlyContinue
+
+        Add-LocalGroupMember `
+          -Group "Remote Desktop Users" `
+          -Member "Rafael" `
+          -ErrorAction SilentlyContinue
+
+        Write-Host "Rafael configured as Administrator." `
+          -ForegroundColor Green
+
+        Write-Host "Rafael added to Remote Desktop Users." `
+          -ForegroundColor Green
+
+    # ============================================================
+    # AUDIO
+    # ============================================================
+    - name: Configure Audio
+      shell: powershell
+      run: |
+        Write-Host "Configuring Windows Audio..." -ForegroundColor Cyan
+
+        $audioServices = @(
+          "Audiosrv",
+          "AudioEndpointBuilder"
+        )
+
+        foreach ($serviceName in $audioServices) {
+
+          $service = Get-Service `
+            -Name $serviceName `
+            -ErrorAction SilentlyContinue
+
+          if ($service) {
+
+            Set-Service `
+              -Name $serviceName `
+              -StartupType Automatic `
+              -ErrorAction SilentlyContinue
+
+            Start-Service `
+              -Name $serviceName `
+              -ErrorAction SilentlyContinue
+
+            Write-Host "$serviceName : $((Get-Service $serviceName).Status)" `
+              -ForegroundColor Green
+          }
+        }
+
+    # ============================================================
+    # NETWORK
+    # ============================================================
+    - name: Configure Network
+      shell: powershell
+      run: |
+        Write-Host "Configuring network services..." -ForegroundColor Cyan
+
+        $networkServices = @(
+          "Dhcp",
+          "Dnscache",
+          "NlaSvc",
+          "netprofm",
+          "WlanSvc"
+        )
+
+        foreach ($serviceName in $networkServices) {
+
+          $service = Get-Service `
+            -Name $serviceName `
+            -ErrorAction SilentlyContinue
+
+          if ($service) {
+
+            Set-Service `
+              -Name $serviceName `
+              -StartupType Automatic `
+              -ErrorAction SilentlyContinue
+
+            Start-Service `
+              -Name $serviceName `
+              -ErrorAction SilentlyContinue
+          }
+        }
+
+        Write-Host ""
+        Write-Host "=== NETWORK ADAPTERS ===" `
+          -ForegroundColor Green
+
+        Get-NetAdapter |
+          Select-Object Name, InterfaceDescription, Status, LinkSpeed |
+          Format-Table -AutoSize
+
+        Get-NetAdapter |
+          Where-Object {$_.Status -eq "Disabled"} |
+          ForEach-Object {
+            Enable-NetAdapter `
+              -Name $_.Name `
+              -Confirm:$false `
+              -ErrorAction SilentlyContinue
+          }
+
+    # ============================================================
+    # INSTALL TAILSCALE
+    # ============================================================
+    - name: Install Tailscale
+      shell: powershell
+      run: |
+        Write-Host "Installing Tailscale..." -ForegroundColor Cyan
+
+        $tailscaleUrl = "https://dl.tailscale.com/stable/tailscale-setup-1.102.4-arm64.msi"
+        $installer = Join-Path `
+          $env:TEMP `
+          "tailscale-arm64.msi"
+
+        Invoke-WebRequest `
+          -Uri $tailscaleUrl `
+          -OutFile $installer `
+          -UseBasicParsing
+
+        if (!(Test-Path $installer)) {
+          throw "Tailscale installer was not downloaded."
+        }
+
+        $process = Start-Process `
+          -FilePath "msiexec.exe" `
+          -ArgumentList "/i `"$installer`" /quiet /norestart" `
+          -Wait `
+          -PassThru
+
+        Write-Host "MSI exit code: $($process.ExitCode)" `
+          -ForegroundColor Yellow
+
+        if (
+          $process.ExitCode -ne 0 -and
+          $process.ExitCode -ne 3010
+        ) {
+          throw "Tailscale installation failed with exit code $($process.ExitCode)."
+        }
+
+        $possiblePaths = @(
+          "C:\Program Files\Tailscale\tailscale.exe",
+          "C:\Program Files (x86)\Tailscale\tailscale.exe"
+        )
+
+        $tailscalePath = $null
+
+        foreach ($path in $possiblePaths) {
+          if (Test-Path $path) {
+            $tailscalePath = $path
+            break
+          }
+        }
+
+        if (!$tailscalePath) {
+
+          $found = Get-ChildItem `
+            -Path "C:\Program Files","C:\Program Files (x86)" `
+            -Filter "tailscale.exe" `
+            -Recurse `
+            -ErrorAction SilentlyContinue |
+            Select-Object -First 1
+
+          if ($found) {
+            $tailscalePath = $found.FullName
+          }
+        }
+
+        if (!$tailscalePath) {
+          throw "tailscale.exe was not found after installation."
+        }
+
+        Write-Host "Tailscale executable found:" `
+          -ForegroundColor Green
+
+        Write-Host $tailscalePath `
+          -ForegroundColor White
+
+        "TAILSCALE_PATH=$tailscalePath" >> $env:GITHUB_ENV
+
+    # ============================================================
+    # START TAILSCALE - CORREÇÃO DO NoState
+    # ============================================================
+    - name: Start Tailscale
+      shell: powershell
+      run: |
+        Write-Host "Starting Tailscale..." -ForegroundColor Green
+
+        if (!$env:TAILSCALE_PATH) {
+          throw "TAILSCALE_PATH is empty."
+        }
+
+        if (!(Test-Path $env:TAILSCALE_PATH)) {
+          throw "Tailscale executable not found at $env:TAILSCALE_PATH"
+        }
+
+        Write-Host "Using Tailscale executable:" `
+          -ForegroundColor Cyan
+
+        Write-Host $env:TAILSCALE_PATH `
+          -ForegroundColor White
+
+        & $env:TAILSCALE_PATH version
+
+        # --------------------------------------------------------
+        # GARANTIR QUE O SERVIÇO ESTÁ EXECUTANDO
+        # --------------------------------------------------------
+        Write-Host "Checking Tailscale service..." `
+          -ForegroundColor Cyan
+
+        $tsService = Get-Service `
+          -Name "Tailscale" `
+          -ErrorAction SilentlyContinue
+
+        if ($tsService) {
+
+          Write-Host "Service status: $($tsService.Status)" `
+            -ForegroundColor Yellow
+
+          if ($tsService.Status -ne "Running") {
+
+            Write-Host "Starting Tailscale service..." `
+              -ForegroundColor Cyan
+
+            Start-Service `
+              -Name "Tailscale" `
+              -ErrorAction SilentlyContinue
+
+            Start-Sleep -Seconds 5
+          }
+        }
+
+        # --------------------------------------------------------
+        # TAILSCALE UP
+        # --------------------------------------------------------
+        Write-Host "Running tailscale up..." `
+          -ForegroundColor Cyan
+
+        & $env:TAILSCALE_PATH up `
+          --authkey "${{ secrets.TAILSCALE_AUTH_KEY }}" `
+          --hostname "enigmano-${{ github.run_id }}"
+
+        $upExitCode = $LASTEXITCODE
+
+        Write-Host "tailscale up exit code: $upExitCode" `
+          -ForegroundColor Yellow
+
+        # --------------------------------------------------------
+        # AGUARDAR O DAEMON FICAR PRONTO
+        # --------------------------------------------------------
+        $connected = $false
+
+        for ($i = 1; $i -le 18; $i++) {
+
+          Write-Host ""
+          Write-Host "Checking Tailscale status ($i/18)..." `
+            -ForegroundColor Cyan
+
+          $statusOutput = @(
+            & $env:TAILSCALE_PATH status 2>&1
+          )
+
+          $statusExitCode = $LASTEXITCODE
+
+          $statusText = $statusOutput -join "`n"
+
+          Write-Host $statusText `
+            -ForegroundColor Gray
+
+          if (
+            $statusExitCode -eq 0 -and
+            $statusText -notmatch "NoState" -and
+            $statusText -notmatch "Tailscale is starting"
+          ) {
+            $connected = $true
+            break
+          }
+
+          Write-Host "Tailscale is still starting. Waiting 5 seconds..." `
+    
